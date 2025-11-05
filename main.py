@@ -3,12 +3,20 @@ import logging
 import sys
 
 from automation_server_client import AutomationServer, Workqueue, WorkItemError, Credential
+from odk_tools.tracking import Tracker
+from dubu_client import DubuClientManager
 
+tracker: Tracker
+dubu: DubuClientManager
+
+proces_navn = "Journalisering af opmærksomhedsskemaer i DUBU"
 
 async def populate_queue(workqueue: Workqueue):
     logger = logging.getLogger(__name__)
 
     logger.info("Hello from populate workqueue!")
+
+
 
 
 async def process_workqueue(workqueue: Workqueue):
@@ -35,6 +43,19 @@ if __name__ == "__main__":
     workqueue = ats.workqueue()
 
     # Initialize external systems for automation here..
+    tracking_credential = Credential.get_credential("Odense SQL Server")
+    user_credential = Credential.get_credential("RoboA")
+
+    tracker = Tracker(
+        username=tracking_credential.username, 
+        password=tracking_credential.password
+    )
+
+    dubu = DubuClientManager(
+        username=f"{user_credential.username}@odense.dk",
+        password=user_credential.password,
+        idp=user_credential.data["idp"]
+    )
 
     # Queue management
     if "--queue" in sys.argv:

@@ -6,7 +6,11 @@ readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "automation-server-client",
+    "dubu-client",
+    "odk-tools",
 ]
 
 [tool.uv.sources]
 automation-server-client = { git = "https://github.com/odense-rpa/automation-server-client.git", tag = "v0.2.0" }
+odk-tools = { git = "https://github.com/odense-rpa/odk-tools.git" }
+dubu-client = { git = "https://github.com/odense-rpa/dubu-client.git" }
