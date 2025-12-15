@@ -51,6 +51,11 @@ def parse_email_data(text_content: str) -> dict:
     location_match = re.search(r'Hvor er barnet i hverdagen:\s*(.+?)(?:\n|$)', text_content, re.IGNORECASE)
     if location_match:
         data['lokation'] = location_match.group(1).strip()
+
+    # Extract navn
+    navn_match = re.search(r'Navn:\s*(.+?)(?:\n|$)', text_content, re.IGNORECASE)
+    if navn_match:
+        data['navn'] = navn_match.group(1).strip()
     
     return data
 
@@ -68,7 +73,6 @@ class MailService:
         self.settings = settings
         self.graph_client: Optional[GraphServiceClient] = None
         self.credential: Optional[UsernamePasswordCredential] = None
-        logger.info("MailService initialized")
 
     async def initialize(self) -> None:
         """Initialize the Microsoft Graph client."""
@@ -76,7 +80,6 @@ class MailService:
 
     async def _initialize_graph_client(self) -> None:
         """Initialize Microsoft Graph client with username/password credential."""
-        logger.info("Initializing Microsoft Graph client...")
 
         try:
             # Create credential for delegated authentication
@@ -96,8 +99,6 @@ class MailService:
             # Test authentication by getting user info
             await self._test_authentication()
 
-            logger.info("Microsoft Graph client initialized successfully")
-
         except Exception as e:
             logger.error(f"Failed to initialize Graph client: {e}")
             raise
@@ -105,12 +106,11 @@ class MailService:
     async def _test_authentication(self) -> None:
         """Test authentication by making a simple Graph API call."""
         try:
-            logger.info("Testing authentication...")
 
             # Get current user to verify authentication works
             user = await self.graph_client.me.get()
             if user and user.display_name:
-                logger.info(
+                logger.debug(
                     f"Authenticated successfully as: {user.display_name} ({user.user_principal_name})")
             else:
                 raise Exception(
@@ -245,7 +245,7 @@ class MailService:
         limit = min(limit, 100)  # Max 100 messages
 
         try:
-            logger.info(
+            logger.debug(
                 f"Getting messages from {mailbox_address} folder '{folder_name}' (limit: {limit})")
 
             messages = None
@@ -295,7 +295,7 @@ class MailService:
                 for msg in filtered_messages:
                     message_list.append(self._extract_message_info(msg))
 
-                logger.info(
+                logger.debug(
                     f"Retrieved {len(message_list)} messages from {mailbox_address}")
             else:
                 logger.info(

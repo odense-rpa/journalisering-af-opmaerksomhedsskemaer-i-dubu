@@ -3,12 +3,13 @@ import logging
 import os
 import sys
 
-from automation_server_client import AutomationServer, Workqueue, WorkItemError, Credential
+from automation_server_client import AutomationServer, Workqueue, WorkItemError, Credential, WorkItemStatus
 from odk_tools.tracking import Tracker
 from dubu_client import DubuClientManager
 
 from config import settings
 from services.mail_service import MailService, extract_text_from_html, parse_email_data
+from services.utils import calculate_age_from_cpr, setup_logging
 
 tracker: Tracker
 dubu: DubuClientManager
@@ -17,23 +18,10 @@ mail_service: MailService
 proces_navn = "Journalisering af opmærksomhedsskemaer i DUBU"
 
 
-def setup_logging():
-    """Setup logging configuration."""
-    log_level = getattr(logging, settings.log_level.upper(), logging.INFO)
-
-    logging.basicConfig(
-        level=log_level,
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-        handlers=[
-            logging.StreamHandler(sys.stdout),
-        ],
-    )
-
-
 async def populate_queue(workqueue: Workqueue):
     logger = logging.getLogger(__name__)
 
-    logger.info("Checking email inbox for new items...")
+    logger.debug("Checking email inbox for new items...")
     
     # Get messages from inbox
     try:
@@ -41,27 +29,22 @@ async def populate_queue(workqueue: Workqueue):
         logger.info(f"Found {len(messages)} messages in inbox")
         
         # Filter for emails from specific senders
-        allowed_senders = ["gtp@odense.dk", "xflow@odense.dk", "jakkw@odense.dk"]
+        godkendte_afsendere = ["gtp@odense.dk", "xflow@odense.dk", "jakkw@odense.dk"]
         
         for message in messages:
-            from_address = message['from_address'].lower()
+            if workqueue.get_item_by_reference(message['id']): # Check om mail allerede i workqueue
+                logger.debug(f"Message {message['id']} already in workqueue, skipping")
+                continue
+            afsender_email = message['from_address'].lower()
             
             # Skip messages not from allowed senders
-            if from_address not in allowed_senders:
-                logger.debug(f"Skipping message from {from_address} (not in allowed senders)")
+            if afsender_email not in godkendte_afsendere:
                 continue
             
             # Skip messages that don't contain "RPA" in subject
             if "RPA" not in message['subject']:
-                logger.debug(f"Skipping message with subject '{message['subject']}' (RPA not found)")
                 continue
-            
-            logger.info(f"Subject: {message['subject']}")
-            logger.info(f"From: {message['from_name']} ({message['from_address']})")
-            logger.info(f"Received: {message['received_date_time']}")
-            logger.info(f"Has attachments: {message['has_attachments']}")
-            logger.info(f"Body preview: {message['body_preview']}")
-            
+                        
             # Get full email body
             body_data = await mail_service.get_message_body(settings.username, message['id'])
             if body_data:
@@ -70,45 +53,39 @@ async def populate_queue(workqueue: Workqueue):
                 
                 # Convert HTML to plain text if needed
                 if content_type.lower() == 'html':
-                    plain_text = extract_text_from_html(content)
+                    ren_tekst = extract_text_from_html(content)
                 else:
-                    plain_text = content
+                    ren_tekst = content
                 
                 # Extract structured data from email
-                extracted_data = parse_email_data(plain_text)
+                workqueue_data = parse_email_data(ren_tekst)
+                workqueue_data["email_id"] = message['id']
 
-                
-                logger.info(f"Extracted data:")
-                logger.info(f"  Indsendt dato: {extracted_data.get('indsendt_dato', 'N/A')}")
-                logger.info(f"  CPR-nr: {extracted_data.get('cpr_nr', 'N/A')}")
-                logger.info(f"  Lokation: {extracted_data.get('lokation', 'N/A')}")
-                
+                # Calculate age from CPR number
+                if 'cpr_nr' in workqueue_data:
+                    age = calculate_age_from_cpr(workqueue_data['cpr_nr'])
+                    workqueue_data['alder'] = age
+                # Hvis borger er >= 15, så skip
+                if workqueue_data.get('alder', 0) >= 15:
+                    continue
+
                 # Extract attachments from email
                 if message['has_attachments']:
                     attachments = await mail_service.list_attachments(settings.username, message['id'])
                     logger.info(f"Found {len(attachments)} attachments:")
                     for filename, temp_path, metadata in attachments:
-                        logger.info(f"  - {filename} ({metadata['size']} bytes) -> {temp_path}")
                         
                         # Look for the specific PDF file
                         if filename == "RPA_aflevering_til_postkasse.pdf":
-                            logger.info(f"Found target PDF: {filename}")
-                            extracted_data['pdf_path'] = temp_path
+                            workqueue_data['pdf_path'] = temp_path
             
             workqueue.add_item(
-                data=extracted_data,
-                reference=extracted_data.get('cpr_nr', 'unknown')
+                data=workqueue_data,
+                reference=workqueue_data.get('email_id', 'unknown')
             )
-            logger.info("-" * 80)
-            
-            # TODO: Add items to workqueue based on email content
-            # workqueue.add_item(message, reference=message['id'])
-            
+                   
     except Exception as e:
         logger.error(f"Error checking inbox: {e}")
-
-
-
 
 async def process_workqueue(workqueue: Workqueue):
     logger = logging.getLogger(__name__)
@@ -118,34 +95,42 @@ async def process_workqueue(workqueue: Workqueue):
     for item in workqueue:
         with item:
             data = item.data  # Item data deserialized from json as dict
-
-            # Opret aktivitet i DUBU
-            oprettet_aktivitet = dubu.aktiviteter.opret_aktivitet(
-                sags_id=606094, # TEST_TESTESEN. Skal replaces på et tidspunkt
-                type="Statusudtalelse",
-                undertype="Skole", # Skal også replaces på et tidspunkt
-                beskrivelse="Modtaget opmærksomhedsskema",
-                status="Aktiv", # hvad er det?
-                notat=f"Automatisk oprettet aktivitet for CPRnr: {data.get('cpr_nr', 'N/A')} og lokation: {data.get('lokation', 'N/A')}"
-            )
-
-            # Tilføj dokument til DUBU
-            with open(data['pdf_path'], 'rb') as pdf_file:
-                upload_bytes = pdf_file.read()
-            
-            uploaded_dokument = dubu.dokumenter.upload_dokument_til_aktivitet(
-                sags_id=606094,
-                dokument_titel="RPA Aflevering til postkasse" ,
-                filnavn="RPA_aflevering_til_postkasse.pdf",
-                dokument=upload_bytes,
-                aktivitet=oprettet_aktivitet
-            )
-
-            print("howdy")
-            # fjern temp fil:
-            os.remove(data['pdf_path'])
  
             try:
+                borger = dubu.sager.soeg_sager(
+                    query=data.get('cpr_nr', '')
+                )
+                # test testesen:
+                borger = dubu.sager.soeg_sager(query="2222222222")
+
+                # Opret aktivitet i DUBU
+                oprettet_aktivitet = dubu.aktiviteter.opret_aktivitet(
+                    sags_id=borger["value"][0]["id"],
+                    type="Statusudtalelse",
+                    undertype="Skole", # Skal også replaces på et tidspunkt
+                    beskrivelse="Modtaget opmærksomhedsskema",
+                    status="Aktiv", # hvad er det?
+                    notat=f"Automatisk oprettet aktivitet for CPRnr: {data.get('cpr_nr', 'N/A')} og lokation: {data.get('lokation', 'N/A')}"
+                )
+
+                # Tilføj dokument til DUBU
+                with open(data['pdf_path'], 'rb') as pdf_file:
+                    upload_bytes = pdf_file.read()
+                
+                uploaded_dokument = dubu.dokumenter.upload_dokument_til_aktivitet(
+                    sags_id=borger["value"][0]["id"],
+                    dokument_titel="RPA Aflevering til postkasse" ,
+                    filnavn="RPA_aflevering_til_postkasse.pdf",
+                    dokument=upload_bytes,
+                    aktivitet=oprettet_aktivitet
+                )
+
+                if not uploaded_dokument:
+                    raise WorkItemError("Dokument upload mislykkedes")
+
+                print("howdy")
+                # fjern temp fil:
+                os.remove(data['pdf_path'])
                 # Process the item here
                 pass
             except WorkItemError as e:
@@ -192,7 +177,7 @@ async def main(tracker, dubu, ats):
         # Initialize mail service (async)
         mail_service = MailService(settings)
         await mail_service.initialize()
-        logger.info("Mail service initialized successfully")
+        logger.debug("Mail service initialized successfully")
         
         workqueue.clear_workqueue("new")
         await populate_queue(workqueue)
