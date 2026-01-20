@@ -7,7 +7,6 @@ from automation_server_client import AutomationServer, Workqueue, WorkItemError,
 from odk_tools.tracking import Tracker
 from dubu_client import DubuClientManager
 
-from config import settings
 from services.mail_service import MailService, extract_text_from_html, parse_email_data
 from services.utils import calculate_age_from_cpr, setup_logging
 
@@ -32,8 +31,8 @@ async def populate_queue(workqueue: Workqueue):
         godkendte_afsendere = ["gtp@odense.dk", "xflow@odense.dk", "jakkw@odense.dk"]
         
         for message in messages:
-            if workqueue.get_item_by_reference(message['id']): # Check om mail allerede i workqueue
-                logger.debug(f"Message {message['id']} already in workqueue, skipping")
+            if workqueue.get_item_by_reference(message['internet_message_id']): # Check om mail allerede i workqueue
+                logger.debug(f"Message {message['internet_message_id']} already in workqueue, skipping")
                 continue
             afsender_email = message['from_address'].lower()
             
@@ -46,7 +45,7 @@ async def populate_queue(workqueue: Workqueue):
                 continue
                         
             # Get full email body
-            body_data = await mail_service.get_message_body(settings.username, message['id'])
+            body_data = await mail_service.get_message_body(f"{roboc_credential.username}@odense.dk", message['id'])
             if body_data:
                 content_type = body_data['content_type']
                 content = body_data['content']
@@ -66,12 +65,12 @@ async def populate_queue(workqueue: Workqueue):
                     age = calculate_age_from_cpr(workqueue_data['cpr_nr'])
                     workqueue_data['alder'] = age
                 # Hvis borger er >= 15, så skip
-                if workqueue_data.get('alder', 0) >= 15:
-                    continue
+                # if workqueue_data.get('alder', 0) >= 15:
+                #     continue
 
                 # Extract attachments from email
                 if message['has_attachments']:
-                    attachments = await mail_service.list_attachments(settings.username, message['id'])
+                    attachments = await mail_service.list_attachments(f"{roboc_credential.username}@odense.dk", message['id'])
                     logger.info(f"Found {len(attachments)} attachments:")
                     for filename, temp_path, metadata in attachments:
                         
@@ -81,7 +80,7 @@ async def populate_queue(workqueue: Workqueue):
             
             workqueue.add_item(
                 data=workqueue_data,
-                reference=workqueue_data.get('email_id', 'unknown')
+                reference=message['internet_message_id']
             )
                    
     except Exception as e:
@@ -97,6 +96,7 @@ async def process_workqueue(workqueue: Workqueue):
             data = item.data  # Item data deserialized from json as dict
  
             try:
+
                 borger = dubu.sager.soeg_sager(
                     query=data.get('cpr_nr', '')
                 )
@@ -127,6 +127,22 @@ async def process_workqueue(workqueue: Workqueue):
 
                 if not uploaded_dokument:
                     raise WorkItemError("Dokument upload mislykkedes")
+                
+
+                # Find all mapper i indbakken
+                mapper = await mail_service.list_shared_mailbox_folders(f"{roboc_credential.username}@odense.dk")
+
+                # Find mappe "Opmærksomhedsskemaer - behandlet"
+                behandlet_mappe_id = None
+                for mappe in mapper:
+                    if mappe['display_name'] == "Opmærksomhedsskemaer - behandlet":
+                        behandlet_mappe_id = mappe['id']
+                        break
+
+                # Flyt mail til mappe "Opmærksomhedsskemaer - behandlet"
+                await mail_service.move_message(
+                    f"{roboc_credential.username}@odense.dk", data['email_id'], behandlet_mappe_id)                
+
 
                 print("howdy")
                 # fjern temp fil:
@@ -146,7 +162,8 @@ def initialize_sync_services():
     
     # Initialize external systems for automation here..
     tracking_credential = Credential.get_credential("Odense SQL Server")
-    user_credential = Credential.get_credential("RoboA")
+    roboa_credential = Credential.get_credential("RoboA") # bruges til at logge ind på DUBU
+    roboc_credential = Credential.get_credential("RoboC") # bruges til at hente emails
 
     tracker = Tracker(
         username=tracking_credential.username, 
@@ -154,15 +171,15 @@ def initialize_sync_services():
     )
 
     dubu = DubuClientManager(
-        username=f"{user_credential.username}@odense.dk",
-        password=user_credential.password,
-        idp=user_credential.data["idp"]
+        username=f"{roboa_credential.username}@odense.dk",
+        password=roboa_credential.password,
+        idp=roboa_credential.data["idp"]
     )
     
-    return tracker, dubu, ats
+    return tracker, dubu, ats, roboc_credential
 
 
-async def main(tracker, dubu, ats):
+async def main(tracker, dubu, ats, roboc_credential):
     """Main entry point."""
     logger = logging.getLogger(__name__)
     
@@ -170,15 +187,14 @@ async def main(tracker, dubu, ats):
     
     global mail_service
     
-    workqueue = ats.workqueue()
+    # Initialize mail service (async)
+    mail_service = MailService(roboc_credential)
+    await mail_service.initialize()
+    logger.debug("Mail service initialized successfully")
     
+    workqueue = ats.workqueue()
     # Queue management
     if "--queue" in sys.argv:
-        # Initialize mail service (async)
-        mail_service = MailService(settings)
-        await mail_service.initialize()
-        logger.debug("Mail service initialized successfully")
-        
         workqueue.clear_workqueue("new")
         await populate_queue(workqueue)
         exit(0)
@@ -192,7 +208,7 @@ if __name__ == "__main__":
     setup_logging()
     
     # Initialize sync services BEFORE starting asyncio
-    tracker, dubu, ats = initialize_sync_services()
+    tracker, dubu, ats, roboc_credential = initialize_sync_services()
     
     # Now run async code
-    asyncio.run(main(tracker, dubu, ats))
+    asyncio.run(main(tracker, dubu, ats, roboc_credential))

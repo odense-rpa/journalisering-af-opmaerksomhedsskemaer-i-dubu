@@ -13,7 +13,7 @@ from azure.identity import UsernamePasswordCredential
 from bs4 import BeautifulSoup
 from msgraph.graph_service_client import GraphServiceClient
 
-from config import Settings
+from automation_server_client import Credential
 
 logger = logging.getLogger(__name__)
 
@@ -63,14 +63,14 @@ def parse_email_data(text_content: str) -> dict:
 class MailService:
     """Utility service for email operations using Microsoft Graph API."""
 
-    def __init__(self, settings: Settings):
+    def __init__(self, roboc_credential: Credential):
         """
         Initialize the mail service.
 
         Args:
-            settings: Application settings
+            roboc_credential: Automation Server credential for email access
         """
-        self.settings = settings
+        self.credential_obj = roboc_credential
         self.graph_client: Optional[GraphServiceClient] = None
         self.credential: Optional[UsernamePasswordCredential] = None
 
@@ -82,18 +82,28 @@ class MailService:
         """Initialize Microsoft Graph client with username/password credential."""
 
         try:
+            # Extract Graph API configuration from credential data
+            credential_data = self.credential_obj.data if hasattr(self.credential_obj, 'data') else {}
+            
+            logger.debug(f"Credential data keys: {credential_data.keys()}")
+            logger.debug(f"Username: {self.credential_obj.username}")
+            logger.debug(f"Tenant ID: {credential_data.get('tenant_id', 'NOT SET')}")
+            logger.debug(f"Client ID: {credential_data.get('client_id', 'NOT SET')}")
+            
             # Create credential for delegated authentication
+            username_with_domain = f"{self.credential_obj.username}@odense.dk"
             self.credential = UsernamePasswordCredential(
-                client_id=self.settings.client_id,
-                username=self.settings.username,
-                password=self.settings.password,
-                tenant_id=self.settings.tenant_id
+                client_id=credential_data.get('client_id', ''),
+                username=username_with_domain,
+                password=self.credential_obj.password,
+                tenant_id=credential_data.get('tenant_id', '')
             )
 
             # Create Graph service client
+            scope = credential_data.get('graph_scope', 'https://graph.microsoft.com/.default')
             self.graph_client = GraphServiceClient(
                 credentials=self.credential,
-                scopes=[self.settings.scope]
+                scopes=[scope]
             )
 
             # Test authentication by getting user info
@@ -123,7 +133,8 @@ class MailService:
 
     def _is_personal_mailbox(self, mailbox_address: str) -> bool:
         """Check if the mailbox address is the personal mailbox."""
-        return mailbox_address.lower() == self.settings.username.lower()
+        username_with_domain = f"{self.credential_obj.username}@odense.dk"
+        return mailbox_address.lower() == username_with_domain.lower()
 
     def _get_messages_request_builder(self, mailbox_address: str):
         """Get the appropriate messages request builder for personal or shared mailbox."""
@@ -142,6 +153,7 @@ class MailService:
 
         return {
             'id': msg.id,
+            'internet_message_id': getattr(msg, 'internet_message_id', None),
             'subject': msg.subject or "(No subject)",
             'from_address': from_address,
             'from_name': from_name,
@@ -172,21 +184,110 @@ class MailService:
         """
         # Delegate to get_shared_mailbox_messages with personal mailbox address
         return await self.get_shared_mailbox_messages(
-            mailbox_address=self.settings.username,
+            mailbox_address=f"{self.credential_obj.username}@odense.dk",
             folder_name="Inbox",
             limit=limit,
             unread_only=False
         )
 
+    async def get_inbox_subfolders(self) -> List[Dict[str, Any]]:
+        """
+        Get all subfolders under the Inbox (Indbakke) folder only.
+
+        Returns:
+            List of subfolder information dictionaries with nested subfolders
+        """
+        if not self.graph_client:
+            raise Exception("Graph client not initialized")
+
+        try:
+            logger.info(f"Listing subfolders under Inbox for {self.credential_obj.username}")
+
+            all_folders = await self.list_shared_mailbox_folders(self.credential_obj.username)
+            
+            # Find the Inbox folder (handles both English and Danish names)
+            inbox_folder = None
+            for folder in all_folders:
+                if folder['display_name'].lower() in ['inbox', 'indbakke']:
+                    inbox_folder = folder
+                    break
+
+            if not inbox_folder:
+                logger.warning("Inbox folder not found")
+                return []
+
+            logger.info(f"Found {len(inbox_folder['subfolders'])} subfolders under Inbox")
+            return inbox_folder['subfolders']
+
+        except Exception as e:
+            logger.error(f"Error getting inbox subfolders: {e}")
+            raise
+
+    async def _list_subfolders_recursive(self, mailbox_address: str, parent_folder_id: Optional[str] = None, depth: int = 0) -> List[Dict[str, Any]]:
+        """
+        Recursively list all subfolders within a folder.
+
+        Args:
+            mailbox_address: Email address of the mailbox
+            parent_folder_id: ID of the parent folder (None for root)
+            depth: Current recursion depth for logging
+
+        Returns:
+            List of folder information dictionaries with nested structure
+        """
+        folder_list = []
+        
+        try:
+            if parent_folder_id is None:
+                # Get root level folders
+                if self._is_personal_mailbox(mailbox_address):
+                    folders = await self.graph_client.me.mail_folders.get()
+                else:
+                    folders = await self.graph_client.users.by_user_id(mailbox_address).mail_folders.get()
+            else:
+                # Get subfolders of a specific folder
+                if self._is_personal_mailbox(mailbox_address):
+                    folders = await self.graph_client.me.mail_folders.by_mail_folder_id(parent_folder_id).child_folders.get()
+                else:
+                    folders = await self.graph_client.users.by_user_id(mailbox_address).mail_folders.by_mail_folder_id(parent_folder_id).child_folders.get()
+
+            if folders and folders.value:
+                for folder in folders.value:
+                    folder_info = {
+                        'id': folder.id,
+                        'display_name': folder.display_name,
+                        'total_item_count': folder.total_item_count,
+                        'unread_item_count': folder.unread_item_count,
+                        'child_folder_count': folder.child_folder_count,
+                        'subfolders': []
+                    }
+
+                    # Recursively get subfolders if this folder has children
+                    if folder.child_folder_count and folder.child_folder_count > 0:
+                        subfolders = await self._list_subfolders_recursive(
+                            mailbox_address=mailbox_address,
+                            parent_folder_id=folder.id,
+                            depth=depth + 1
+                        )
+                        folder_info['subfolders'] = subfolders
+
+                    folder_list.append(folder_info)
+
+            return folder_list
+
+        except Exception as e:
+            logger.error(f"Error listing subfolders at depth {depth} for {mailbox_address}: {e}")
+            raise
+
     async def list_shared_mailbox_folders(self, mailbox_address: str) -> List[Dict[str, Any]]:
         """
-        List all folders in a mailbox (personal or shared).
+        List all folders in a mailbox (personal or shared), including nested subfolders.
 
         Args:
             mailbox_address: Email address of the mailbox
 
         Returns:
-            List of folder information dictionaries
+            List of folder information dictionaries with nested subfolders
         """
         if not self.graph_client:
             raise Exception("Graph client not initialized")
@@ -195,28 +296,13 @@ class MailService:
             logger.info(
                 f"Listing folders for mailbox: {mailbox_address}")
 
-            # Use appropriate API for personal vs shared mailbox
-            if self._is_personal_mailbox(mailbox_address):
-                folders = await self.graph_client.me.mail_folders.get()
-            else:
-                folders = await self.graph_client.users.by_user_id(mailbox_address).mail_folders.get()
+            folder_list = await self._list_subfolders_recursive(
+                mailbox_address=mailbox_address,
+                parent_folder_id=None
+            )
 
-            folder_list = []
-            if folders and folders.value:
-                for folder in folders.value:
-                    folder_info = {
-                        'id': folder.id,
-                        'display_name': folder.display_name,
-                        'total_item_count': folder.total_item_count,
-                        'unread_item_count': folder.unread_item_count,
-                        'child_folder_count': folder.child_folder_count
-                    }
-                    folder_list.append(folder_info)
-
-                logger.info(
-                    f"Found {len(folder_list)} folders in {mailbox_address}")
-            else:
-                logger.warning(f"No folders found in {mailbox_address}")
+            logger.info(
+                f"Found {len(folder_list)} top-level folders in {mailbox_address}")
 
             return folder_list
 
@@ -258,7 +344,11 @@ class MailService:
                         top=limit
                     )
                 )
-                messages = await self._get_messages_request_builder(mailbox_address).get(request_configuration=request_config)
+                # Get messages from the Inbox folder specifically
+                if self._is_personal_mailbox(mailbox_address):
+                    messages = await self.graph_client.me.mail_folders.by_mail_folder_id("inbox").messages.get(request_configuration=request_config)
+                else:
+                    messages = await self.graph_client.users.by_user_id(mailbox_address).mail_folders.by_mail_folder_id("inbox").messages.get(request_configuration=request_config)
             else:
                 # Find the specific folder first
                 target_folder = await self._find_folder_by_name(mailbox_address, folder_name)
@@ -442,3 +532,35 @@ class MailService:
         except Exception as e:
             logger.error(f"Error getting message body: {e}")
             return {}
+
+    async def move_message(self, mailbox_address: str, message_id: str, destination_folder_id: str) -> bool:
+        """
+        Move a message to a different folder.
+
+        Args:
+            mailbox_address: Email address of the mailbox
+            message_id: ID of the message to move
+            destination_folder_id: ID of the destination folder
+
+        Returns:
+            True if successful, False otherwise
+        """
+        if not self.graph_client:
+            raise Exception("Graph client not initialized")
+
+        try:
+            logger.debug(f"Moving message {message_id} to folder {destination_folder_id}")
+
+            from msgraph.generated.users.item.messages.item.move.move_post_request_body import MovePostRequestBody
+
+            body = MovePostRequestBody()
+            body.destination_id = destination_folder_id
+
+            await self._get_messages_request_builder(mailbox_address).by_message_id(message_id).move.post(body)
+
+            logger.info(f"Successfully moved message {message_id} to folder {destination_folder_id}")
+            return True
+
+        except Exception as e:
+            logger.error(f"Error moving message {message_id}: {e}")
+            return False
