@@ -5,15 +5,10 @@ import logging
 import sys
 from datetime import datetime
 
-from config import settings
-
 
 def setup_logging():
-    """Setup logging configuration."""
-    log_level = getattr(logging, settings.log_level.upper(), logging.INFO)
-
     logging.basicConfig(
-        level=log_level,
+        level=logging.INFO,
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
         handlers=[
             logging.StreamHandler(sys.stdout),

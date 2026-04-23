@@ -47,8 +47,8 @@ def parse_email_data(text_content: str) -> dict:
     if cpr_match:
         data['cpr_nr'] = cpr_match.group(1)
     
-    # Extract location (Hvor er barnet i hverdagen)
-    location_match = re.search(r'Hvor er barnet i hverdagen:\s*(.+?)(?:\n|$)', text_content, re.IGNORECASE)
+    # Extract location (Henvendelsen kommer fra)
+    location_match = re.search(r'Henvendelsen kommer fra:\s*(.+?)(?:\n|$)', text_content, re.IGNORECASE)
     if location_match:
         data['lokation'] = location_match.group(1).strip()
 
@@ -172,7 +172,7 @@ class MailService:
                 return folder
         return None
 
-    async def check_inbox_messages(self, limit: int = 50) -> List[Dict[str, Any]]:
+    async def check_inbox_messages(self, mailbox_address: str, limit: int = 50) -> List[Dict[str, Any]]:
         """
         Check the user's inbox for messages.
 
@@ -184,7 +184,7 @@ class MailService:
         """
         # Delegate to get_shared_mailbox_messages with personal mailbox address
         return await self.get_shared_mailbox_messages(
-            mailbox_address=f"{self.credential_obj.username}@odense.dk",
+            mailbox_address=mailbox_address,
             folder_name="Inbox",
             limit=limit,
             unread_only=False

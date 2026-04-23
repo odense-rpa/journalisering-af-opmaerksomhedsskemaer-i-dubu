@@ -1,5 +1,5 @@
 [project]
-name = "process-template"
+name = "journalisering-af-opmaerksomhedsskemaer-i-dubu"
 version = "0.2.0"
 description = "Add your description here"
 readme = "README.md"
@@ -13,9 +13,11 @@ dependencies = [
     "aiofiles>=23.2.1",
     "python-dotenv>=1.0.0",
     "beautifulsoup4>=4.12.0",
+    "active-directory",
 ]
 
 [tool.uv.sources]
 automation-server-client = { git = "https://github.com/odense-rpa/automation-server-client.git", tag = "v0.2.1" }
 odk-tools = { git = "https://github.com/odense-rpa/odk-tools.git" }
 dubu-client = { git = "https://github.com/odense-rpa/dubu-client.git" }
+active-directory = { git = "https://github.com/odense-rpa/active-directory.git" }

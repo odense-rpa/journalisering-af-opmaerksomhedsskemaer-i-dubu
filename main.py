@@ -3,32 +3,30 @@ import logging
 import os
 import sys
 
-from automation_server_client import AutomationServer, Workqueue, WorkItemError, Credential, WorkItemStatus
+from automation_server_client import AutomationServer, Workqueue, WorkItemError, Credential
 from odk_tools.tracking import Tracker
 from dubu_client import DubuClientManager
-
+from active_directory.client import ActiveDirectoryClient
 from services.mail_service import MailService, extract_text_from_html, parse_email_data
 from services.utils import calculate_age_from_cpr, setup_logging
 
 tracker: Tracker
 dubu: DubuClientManager
 mail_service: MailService
-
+ad_client: ActiveDirectoryClient
 proces_navn = "Journalisering af opmærksomhedsskemaer i DUBU"
 
 
 async def populate_queue(workqueue: Workqueue):
     logger = logging.getLogger(__name__)
 
-    logger.debug("Checking email inbox for new items...")
-    
     # Get messages from inbox
     try:
-        messages = await mail_service.check_inbox_messages(limit=10)
+        messages = await mail_service.check_inbox_messages(limit=10, mailbox_address="rpa.bfr@odense.dk")
         logger.info(f"Found {len(messages)} messages in inbox")
         
         # Filter for emails from specific senders
-        godkendte_afsendere = ["gtp@odense.dk", "xflow@odense.dk", "jakkw@odense.dk"]
+        godkendte_afsendere = ["xflow@odense.dk"]
         
         for message in messages:
             if workqueue.get_item_by_reference(message['internet_message_id']): # Check om mail allerede i workqueue
@@ -39,13 +37,10 @@ async def populate_queue(workqueue: Workqueue):
             # Skip messages not from allowed senders
             if afsender_email not in godkendte_afsendere:
                 continue
-            
-            # Skip messages that don't contain "RPA" in subject
-            if "RPA" not in message['subject']:
-                continue
                         
             # Get full email body
-            body_data = await mail_service.get_message_body(f"{roboc_credential.username}@odense.dk", message['id'])
+            body_data = await mail_service.get_message_body("rpa.bfr@odense.dk", message['id'])
+
             if body_data:
                 content_type = body_data['content_type']
                 content = body_data['content']
@@ -70,18 +65,17 @@ async def populate_queue(workqueue: Workqueue):
 
                 # Extract attachments from email
                 if message['has_attachments']:
-                    attachments = await mail_service.list_attachments(f"{roboc_credential.username}@odense.dk", message['id'])
+                    attachments = await mail_service.list_attachments("rpa.bfr@odense.dk", message['id'])
                     logger.info(f"Found {len(attachments)} attachments:")
-                    for filename, temp_path, metadata in attachments:
-                        
-                        # Look for the specific PDF file
-                        if filename == "RPA_aflevering_til_postkasse.pdf":
-                            workqueue_data['pdf_path'] = temp_path
+
+                    for filename, temp_path, metadata in attachments:                        
+                        workqueue_data['pdf_path'] = temp_path
+                        break
             
-            workqueue.add_item(
-                data=workqueue_data,
-                reference=message['internet_message_id']
-            )
+                workqueue.add_item(
+                    data=workqueue_data,
+                    reference=message['internet_message_id']
+                )
                    
     except Exception as e:
         logger.error(f"Error checking inbox: {e}")
@@ -89,28 +83,26 @@ async def populate_queue(workqueue: Workqueue):
 async def process_workqueue(workqueue: Workqueue):
     logger = logging.getLogger(__name__)
 
-    logger.info("Hello from process workqueue!")
-
     for item in workqueue:
         with item:
             data = item.data  # Item data deserialized from json as dict
  
             try:
-
-                borger = dubu.sager.soeg_sager(
+                borger_sag = dubu.sager.soeg_sager(
                     query=data.get('cpr_nr', '')
                 )
                 # test testesen:
-                borger = dubu.sager.soeg_sager(query="2222222222")
+                borger_sag = dubu.sager.soeg_sager(query="2222222222")
+                borger_sag = borger_sag["value"][0]
 
                 # Opret aktivitet i DUBU
                 oprettet_aktivitet = dubu.aktiviteter.opret_aktivitet(
-                    sags_id=borger["value"][0]["id"],
+                    sags_id=borger_sag["id"],
                     type="Statusudtalelse",
-                    undertype="Skole", # Skal også replaces på et tidspunkt
+                    undertype=data.get("lokation", "Ukendt"),
                     beskrivelse="Modtaget opmærksomhedsskema",
-                    status="Aktiv", # hvad er det?
-                    notat=f"Automatisk oprettet aktivitet for CPRnr: {data.get('cpr_nr', 'N/A')} og lokation: {data.get('lokation', 'N/A')}"
+                    status="Aktiv",
+                    notat=f"Modtaget opmærksomhedsskema fra {data.get('lokation', '')}<br/>//Journaliseret af RPA"
                 )
 
                 # Tilføj dokument til DUBU
@@ -118,8 +110,8 @@ async def process_workqueue(workqueue: Workqueue):
                     upload_bytes = pdf_file.read()
                 
                 uploaded_dokument = dubu.dokumenter.upload_dokument_til_aktivitet(
-                    sags_id=borger["value"][0]["id"],
-                    dokument_titel="RPA Aflevering til postkasse" ,
+                    sags_id=borger_sag["id"],
+                    dokument_titel=f" Opmærksomhedsskema {data.get('lokation', '')}" ,
                     filnavn="RPA_aflevering_til_postkasse.pdf",
                     dokument=upload_bytes,
                     aktivitet=oprettet_aktivitet
@@ -127,7 +119,50 @@ async def process_workqueue(workqueue: Workqueue):
 
                 if not uploaded_dokument:
                     raise WorkItemError("Dokument upload mislykkedes")
+                                
+                modtager = dubu.brugere.soeg_modtager_bruger(borger_sag["primaerBehandler"]["navn"], str(borger_sag["primaerBehandler"]["email"]).split("@")[0])
+
+                if modtager is None:
+                    raise WorkItemError("Modtager ikke fundet i DUBU")
+
+                sag = dubu._client.get(f"api/sager/{borger_sag['id']}").json()
+
+                dubu.advisering.opret_advisering(
+                    sags_reference=sag["sagReference"],
+                    titel="Opmærksomhedsskema modtaget",
+                    type="PersonligAdvisering",
+                    ansvar="Sagsbehandler",
+                    beskrivelse=f"Et opmærksomhedsskema er modtaget og journaliseret for CPRnr: {data.get('cpr_nr', 'N/A')} på <a href='https://www.dubu.dk/#/aktivitet/{oprettet_aktivitet['id']}'>aktiviteten</a>",
+                    modtager=modtager
+                )
+
+                attributes = ['displayName', 'mail', 'odkLeder']
+                leder = ad_client.søg(søgefilter=f"(sAMAccountName={str(borger_sag['primaerBehandler']['email']).split('@')[0]})", attributes=attributes)
+                if not leder or not leder[0]['odkLeder'].value:
+                    # Overvej at skippe leder advisering i stedet
+                    raise WorkItemError("Leder ikke fundet i Active Directory")
+
+                leder_samaccountname = leder[0]['odkLeder'].value
+                leder = ad_client.søg(
+                    søgefilter=f"(sAMAccountName={leder_samaccountname})",
+                    attributes=attributes,
+                )
+
+                leder = leder[0] if leder else None
                 
+                if not leder:
+                    raise WorkItemError("Leder ikke fundet i Active Directory")
+
+                leder = dubu.brugere.soeg_modtager_bruger(leder['displayName'].value, leder_samaccountname)
+                
+                dubu.advisering.opret_advisering(
+                    sags_reference=sag["sagReference"],
+                    titel="Opmærksomhedsskema modtaget",
+                    type="PersonligAdvisering",
+                    ansvar="Ledelse",
+                    beskrivelse=f"Primær sagsbehandler er {borger_sag['primaerBehandler']['navn']}. Se aktivitet <a href='https://www.dubu.dk/#/aktivitet/{oprettet_aktivitet['id']}'>her</a>",
+                    modtager=leder
+                )                
 
                 # Find all mapper i indbakken
                 mapper = await mail_service.list_shared_mailbox_folders(f"{roboc_credential.username}@odense.dk")
@@ -139,16 +174,14 @@ async def process_workqueue(workqueue: Workqueue):
                         behandlet_mappe_id = mappe['id']
                         break
 
+                if not behandlet_mappe_id:
+                    raise WorkItemError("Mappen 'Opmærksomhedsskemaer - behandlet' blev ikke fundet i mailboksen")
+
                 # Flyt mail til mappe "Opmærksomhedsskemaer - behandlet"
                 await mail_service.move_message(
                     f"{roboc_credential.username}@odense.dk", data['email_id'], behandlet_mappe_id)                
 
-
-                print("howdy")
-                # fjern temp fil:
                 os.remove(data['pdf_path'])
-                # Process the item here
-                pass
             except WorkItemError as e:
                 # A WorkItemError represents a soft error that indicates the item should be passed to manual processing or a business logic fault
                 logger.error(f"Error processing item: {data}. Error: {e}")
@@ -176,7 +209,16 @@ def initialize_sync_services():
         idp=roboa_credential.data["idp"]
     )
     
-    return tracker, dubu, ats, roboc_credential
+    ad_client = ActiveDirectoryClient(
+        server_url=roboa_credential.data["ad_server_url"],
+        port=int(roboa_credential.data["ad_server_port"]),
+        base_dn=roboa_credential.data["ad_server_base_dn"],
+        username=f"{roboa_credential.username}@odense.dk",
+        password=roboa_credential.password
+    )
+        
+
+    return tracker, dubu, ats, roboc_credential, ad_client
 
 
 async def main(tracker, dubu, ats, roboc_credential):
@@ -208,7 +250,7 @@ if __name__ == "__main__":
     setup_logging()
     
     # Initialize sync services BEFORE starting asyncio
-    tracker, dubu, ats, roboc_credential = initialize_sync_services()
+    tracker, dubu, ats, roboc_credential, ad_client = initialize_sync_services()
     
     # Now run async code
     asyncio.run(main(tracker, dubu, ats, roboc_credential))
