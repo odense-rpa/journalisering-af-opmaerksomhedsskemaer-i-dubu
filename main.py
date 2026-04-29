@@ -22,7 +22,7 @@ async def populate_queue(workqueue: Workqueue):
 
     # Get messages from inbox
     try:
-        messages = await mail_service.check_inbox_messages(limit=10, mailbox_address="rpa.bfr@odense.dk")
+        messages = await mail_service.check_inbox_messages(limit=100, mailbox_address="rpa.bfr@odense.dk")
         logger.info(f"Found {len(messages)} messages in inbox")
         
         # Filter for emails from specific senders
@@ -91,8 +91,7 @@ async def process_workqueue(workqueue: Workqueue):
                 borger_sag = dubu.sager.soeg_sager(
                     query=data.get('cpr_nr', '')
                 )
-                # test testesen:
-                borger_sag = dubu.sager.soeg_sager(query="2222222222")
+                
                 borger_sag = borger_sag["value"][0]
 
                 # Opret aktivitet i DUBU
@@ -102,7 +101,7 @@ async def process_workqueue(workqueue: Workqueue):
                     undertype=data.get("lokation", "Ukendt"),
                     beskrivelse="Modtaget opmærksomhedsskema",
                     status="Aktiv",
-                    notat=f"Modtaget opmærksomhedsskema fra {data.get('lokation', '')}<br/>//Journaliseret af RPA"
+                    notat=f"Modtaget opmærksomhedsskema fra {data.get('navn', '')}<br/>//Journaliseret af RPA"
                 )
 
                 # Tilføj dokument til DUBU
@@ -111,7 +110,7 @@ async def process_workqueue(workqueue: Workqueue):
                 
                 uploaded_dokument = dubu.dokumenter.upload_dokument_til_aktivitet(
                     sags_id=borger_sag["id"],
-                    dokument_titel=f" Opmærksomhedsskema {data.get('lokation', '')}" ,
+                    dokument_titel=f" Opmærksomhedsskema {data.get('navn', '')}" ,
                     filnavn="RPA_aflevering_til_postkasse.pdf",
                     dokument=upload_bytes,
                     aktivitet=oprettet_aktivitet
@@ -164,22 +163,14 @@ async def process_workqueue(workqueue: Workqueue):
                     modtager=leder
                 )                
 
-                # Find all mapper i indbakken
-                mapper = await mail_service.list_shared_mailbox_folders(f"{roboc_credential.username}@odense.dk")
+                behandlet_mappe = await mail_service._find_folder_by_name(mailbox_address="rpa.bfr@odense.dk", folder_name="Journaliseret opmærksomhedsskema")
 
-                # Find mappe "Opmærksomhedsskemaer - behandlet"
-                behandlet_mappe_id = None
-                for mappe in mapper:
-                    if mappe['display_name'] == "Opmærksomhedsskemaer - behandlet":
-                        behandlet_mappe_id = mappe['id']
-                        break
+                if not behandlet_mappe:
+                    raise WorkItemError("Mappen 'Journaliseret opmærksomhedsskema' blev ikke fundet i mailboksen")
 
-                if not behandlet_mappe_id:
-                    raise WorkItemError("Mappen 'Opmærksomhedsskemaer - behandlet' blev ikke fundet i mailboksen")
-
-                # Flyt mail til mappe "Opmærksomhedsskemaer - behandlet"
+                # Flyt mail til mappe "Journaliseret opmærksomhedsskema"
                 await mail_service.move_message(
-                    f"{roboc_credential.username}@odense.dk", data['email_id'], behandlet_mappe_id)                
+                    "rpa.bfr@odense.dk", data['email_id'], behandlet_mappe['id'])
 
                 os.remove(data['pdf_path'])
             except WorkItemError as e:
