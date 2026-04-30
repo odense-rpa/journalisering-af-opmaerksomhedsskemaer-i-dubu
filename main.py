@@ -101,7 +101,7 @@ async def process_workqueue(workqueue: Workqueue):
                     undertype=data.get("lokation", "Ukendt"),
                     beskrivelse="Modtaget opmærksomhedsskema",
                     status="Aktiv",
-                    notat=f"Modtaget opmærksomhedsskema fra {data.get('navn', '')}<br/>//Journaliseret af RPA"
+                    notat=f"Modtaget opmærksomhedsskema fra {data.get('navn', '')}<br/>//Journaliseret af Robot A"
                 )
 
                 # Tilføj dokument til DUBU
