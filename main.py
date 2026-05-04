@@ -135,33 +135,33 @@ async def process_workqueue(workqueue: Workqueue):
                     modtager=modtager
                 )
 
-                attributes = ['displayName', 'mail', 'odkLeder']
-                leder = ad_client.søg(søgefilter=f"(sAMAccountName={str(borger_sag['primaerBehandler']['email']).split('@')[0]})", attributes=attributes)
-                if not leder or not leder[0]['odkLeder'].value:
-                    # Overvej at skippe leder advisering i stedet
-                    raise WorkItemError("Leder ikke fundet i Active Directory")
+                # attributes = ['displayName', 'mail', 'odkLeder']
+                # leder = ad_client.søg(søgefilter=f"(sAMAccountName={str(borger_sag['primaerBehandler']['email']).split('@')[0]})", attributes=attributes)
+                # if not leder or not leder[0]['odkLeder'].value:
+                #     # Overvej at skippe leder advisering i stedet
+                #     raise WorkItemError("Leder ikke fundet i Active Directory")
 
-                leder_samaccountname = leder[0]['odkLeder'].value
-                leder = ad_client.søg(
-                    søgefilter=f"(sAMAccountName={leder_samaccountname})",
-                    attributes=attributes,
-                )
+                # leder_samaccountname = leder[0]['odkLeder'].value
+                # leder = ad_client.søg(
+                #     søgefilter=f"(sAMAccountName={leder_samaccountname})",
+                #     attributes=attributes,
+                # )
 
-                leder = leder[0] if leder else None
+                # leder = leder[0] if leder else None
                 
-                if not leder:
-                    raise WorkItemError("Leder ikke fundet i Active Directory")
+                # if not leder:
+                #     raise WorkItemError("Leder ikke fundet i Active Directory")
 
-                leder = dubu.brugere.soeg_modtager_bruger(leder['displayName'].value, leder_samaccountname)
+                # leder = dubu.brugere.soeg_modtager_bruger(leder['displayName'].value, leder_samaccountname)
                 
-                dubu.advisering.opret_advisering(
-                    sags_reference=sag["sagReference"],
-                    titel="Opmærksomhedsskema modtaget",
-                    type="PersonligAdvisering",
-                    ansvar="Ledelse",
-                    beskrivelse=f"Primær sagsbehandler er {borger_sag['primaerBehandler']['navn']}. Se aktivitet <a href='https://www.dubu.dk/#/aktivitet/{oprettet_aktivitet['id']}'>her</a>",
-                    modtager=leder
-                )                
+                # dubu.advisering.opret_advisering(
+                #     sags_reference=sag["sagReference"],
+                #     titel="Opmærksomhedsskema modtaget",
+                #     type="PersonligAdvisering",
+                #     ansvar="Ledelse",
+                #     beskrivelse=f"Primær sagsbehandler er {borger_sag['primaerBehandler']['navn']}. Se aktivitet <a href='https://www.dubu.dk/#/aktivitet/{oprettet_aktivitet['id']}'>her</a>",
+                #     modtager=leder
+                # )                
 
                 behandlet_mappe = await mail_service._find_folder_by_name(mailbox_address="rpa.bfr@odense.dk", folder_name="Journaliseret opmærksomhedsskema")
 
