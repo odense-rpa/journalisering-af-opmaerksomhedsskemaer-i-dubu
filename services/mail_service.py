@@ -1,22 +1,25 @@
 """
 Mail service utilities for working with Microsoft Graph API.
 """
+import aiofiles
 import base64
 import logging
 import re
 import tempfile
-import time
-from typing import Any, Dict, List, Optional, Tuple
 
-import aiofiles
+
+from automation_server_client import Credential
 from azure.identity import UsernamePasswordCredential
 from bs4 import BeautifulSoup
 from msgraph.graph_service_client import GraphServiceClient
-
-from automation_server_client import Credential
+from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
+def _is_pdf(att: Any) -> bool:
+    name = (getattr(att, 'name', '') or '').lower()
+    content_type = (getattr(att, 'content_type', '') or '').lower()
+    return name.endswith('.pdf') or content_type == 'application/pdf'
 
 def extract_text_from_html(html_content: str) -> str:
     """Extract plain text from HTML content."""
@@ -472,6 +475,58 @@ class MailService:
             logger.error(
                 f"Error listing attachments for message {message_id}: {e}")
             return []
+
+    async def get_first_file_attachment_bytes(self, mailbox_address: str, message_id: str) -> Optional[Tuple[str, bytes, Dict[str, Any]]]:
+        """
+        Get the first non-inline file attachment as raw bytes from a message.
+
+        Args:
+            mailbox_address: Email address of the mailbox
+            message_id: ID of the message to get attachments from
+
+        Returns:
+            Tuple of (attachment_name, content_bytes, metadata), or None if no file attachment exists.
+        """
+        if not self.graph_client:
+            raise Exception("Graph client not initialized")
+
+        try:
+            attachments = await self._get_messages_request_builder(mailbox_address).by_message_id(message_id).attachments.get()
+
+            if not attachments or not attachments.value:
+                return None
+
+            file_attachments = [att for att in attachments.value if not getattr(att, 'is_inline', False)]
+
+            
+
+            ordered_attachments = sorted(file_attachments, key=lambda att: not _is_pdf(att))
+
+            for attachment in ordered_attachments:
+                attachment_id = getattr(attachment, 'id', None)
+                if not attachment_id:
+                    continue
+
+                attachment_detail = await self._get_messages_request_builder(mailbox_address).by_message_id(message_id).attachments.by_attachment_id(attachment_id).get()
+                content_b64 = getattr(attachment_detail, 'content_bytes', None)
+
+                if attachment_detail and content_b64:
+                    content_bytes = base64.b64decode(content_b64)
+                    attachment_metadata = {
+                        'id': attachment_id,
+                        'name': getattr(attachment, 'name', None),
+                        'size': getattr(attachment, 'size', None),
+                        'content_type': getattr(attachment, 'content_type', None),
+                        'is_inline': getattr(attachment, 'is_inline', False),
+                        'last_modified_date_time': getattr(attachment, 'last_modified_date_time', None)
+                    }
+                    return (getattr(attachment, 'name', None) or "attachment.bin"), content_bytes, attachment_metadata
+
+            return None
+
+        except Exception as e:
+            logger.error(f"Error reading attachment bytes for message {message_id}: {e}")
+            return None
 
     async def mark_message_as_read(self, mailbox_address: str, message_id: str) -> bool:
         """

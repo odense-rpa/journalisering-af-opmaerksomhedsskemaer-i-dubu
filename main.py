@@ -1,6 +1,5 @@
 import asyncio
 import logging
-import os
 import sys
 
 from automation_server_client import AutomationServer, Workqueue, WorkItemError, Credential
@@ -56,22 +55,14 @@ async def populate_queue(workqueue: Workqueue):
                 workqueue_data["email_id"] = message['id']
 
                 # Calculate age from CPR number
-                if 'cpr_nr' in workqueue_data:
-                    age = calculate_age_from_cpr(workqueue_data['cpr_nr'])
-                    workqueue_data['alder'] = age
-                # Hvis borger er >= 15, så skip
-                # if workqueue_data.get('alder', 0) >= 15:
-                #     continue
+                # if 'cpr_nr' in workqueue_data:
+                #     age = calculate_age_from_cpr(workqueue_data['cpr_nr'])
+                #     workqueue_data['alder'] = age
+                # # Hvis borger er >= 15, så skip
+                
+                if workqueue_data.get('alder', 0) >= 15:
+                    continue
 
-                # Extract attachments from email
-                if message['has_attachments']:
-                    attachments = await mail_service.list_attachments("rpa.bfr@odense.dk", message['id'])
-                    logger.info(f"Found {len(attachments)} attachments:")
-
-                    for filename, temp_path, metadata in attachments:                        
-                        workqueue_data['pdf_path'] = temp_path
-                        break
-            
                 workqueue.add_item(
                     data=workqueue_data,
                     reference=message['internet_message_id']
@@ -91,6 +82,10 @@ async def process_workqueue(workqueue: Workqueue):
                 borger_sag = dubu.sager.soeg_sager(
                     query=data.get('cpr_nr', '')
                 )
+
+                borger_sag = dubu.sager.soeg_sager(
+                    query="2222222222",                 
+                )
                 
                 borger_sag = borger_sag["value"][0]
 
@@ -104,14 +99,24 @@ async def process_workqueue(workqueue: Workqueue):
                     notat=f"Modtaget opmærksomhedsskema fra {data.get('navn', '')}<br/>//Journaliseret af Robot A"
                 )
 
-                # Tilføj dokument til DUBU
-                with open(data['pdf_path'], 'rb') as pdf_file:
-                    upload_bytes = pdf_file.read()
+                email_id = data.get('email_id')
+                if not email_id:
+                    raise WorkItemError("email_id mangler i work item data")
+
+                attachment = await mail_service.get_first_file_attachment_bytes(
+                    mailbox_address="rpa.bfr@odense.dk",
+                    message_id=email_id
+                )
+
+                if not attachment:
+                    raise WorkItemError("Ingen vedhæftet fil fundet på mailen")
+
+                attachment_name, upload_bytes, _ = attachment
                 
                 uploaded_dokument = dubu.dokumenter.upload_dokument_til_aktivitet(
                     sags_id=borger_sag["id"],
                     dokument_titel=f" Opmærksomhedsskema {data.get('navn', '')}" ,
-                    filnavn="RPA_aflevering_til_postkasse.pdf",
+                    filnavn=attachment_name or "RPA_aflevering_til_postkasse.pdf",
                     dokument=upload_bytes,
                     aktivitet=oprettet_aktivitet
                 )
@@ -171,8 +176,6 @@ async def process_workqueue(workqueue: Workqueue):
                 # Flyt mail til mappe "Journaliseret opmærksomhedsskema"
                 await mail_service.move_message(
                     "rpa.bfr@odense.dk", data['email_id'], behandlet_mappe['id'])
-
-                os.remove(data['pdf_path'])
             except WorkItemError as e:
                 # A WorkItemError represents a soft error that indicates the item should be passed to manual processing or a business logic fault
                 logger.error(f"Error processing item: {data}. Error: {e}")
