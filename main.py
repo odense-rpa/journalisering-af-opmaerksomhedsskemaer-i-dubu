@@ -83,9 +83,10 @@ async def process_workqueue(workqueue: Workqueue):
                     query=data.get('cpr_nr', '')
                 )
 
-                borger_sag = dubu.sager.soeg_sager(
-                    query="2222222222",                 
-                )
+                # Test Borger
+                # borger_sag = dubu.sager.soeg_sager(
+                #     query="2222222222",                 
+                # )
                 
                 borger_sag = borger_sag["value"][0]
 
