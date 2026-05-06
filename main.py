@@ -83,9 +83,20 @@ async def process_workqueue(workqueue: Workqueue):
             data = item.data  # Item data deserialized from json as dict
 
             try:
-                borger_sag = dubu.sager.soeg_sager(query=data.get("cpr_nr", ""))
-
-                borger_sag = borger_sag["value"][0]
+                soegesvar = dubu.sager.soeg_sager(query=data.get("cpr_nr", ""))
+                borger_sag = next(
+                    (
+                        sag
+                        for sag in soegesvar.get("value", [])
+                        if str(sag.get("primaerPerson", {}).get("cprnr", "")).strip()
+                        == str(data.get("cpr_nr", "")).strip()
+                    ),
+                    None,
+                )
+                if not borger_sag:
+                    raise WorkItemError(
+                        f"Ingen sag fundet med matchende CPRnr: {data.get('cpr_nr', 'N/A')}"
+                    )
 
                 # Opret aktivitet i DUBU
                 oprettet_aktivitet = dubu.aktiviteter.opret_aktivitet(
