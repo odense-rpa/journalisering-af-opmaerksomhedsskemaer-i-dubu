@@ -13,6 +13,7 @@ from dubu_client import DubuClientManager
 from active_directory.client import ActiveDirectoryClient
 from services.mail_service import MailService, extract_text_from_html, parse_email_data
 from services.utils import setup_logging
+from odk_tools.reporting import report
 
 tracker: Tracker
 dubu: DubuClientManager
@@ -112,25 +113,26 @@ async def process_workqueue(workqueue: Workqueue):
                 if not email_id:
                     raise WorkItemError("email_id mangler i work item data")
 
-                attachment = await mail_service.get_first_file_attachment_bytes(
+                attachments = await mail_service.get_attachments(
                     mailbox_address="rpa.bfr@odense.dk", message_id=email_id
                 )
 
-                if not attachment:
+                if not attachments:
                     raise WorkItemError("Ingen vedhæftet fil fundet på mailen")
 
-                attachment_name, upload_bytes, _ = attachment
+                for attachment_name, upload_bytes, _ in attachments:
+                    uploaded_dokument = dubu.dokumenter.upload_dokument_til_aktivitet(
+                        sags_id=borger_sag["id"],
+                        dokument_titel=attachment_name,
+                        filnavn=attachment_name or "RPA_aflevering_til_postkasse.pdf",
+                        dokument=upload_bytes,
+                        aktivitet=oprettet_aktivitet,
+                    )
 
-                uploaded_dokument = dubu.dokumenter.upload_dokument_til_aktivitet(
-                    sags_id=borger_sag["id"],
-                    dokument_titel=f" Opmærksomhedsskema {data.get('navn', '')}",
-                    filnavn=attachment_name or "RPA_aflevering_til_postkasse.pdf",
-                    dokument=upload_bytes,
-                    aktivitet=oprettet_aktivitet,
-                )
-
-                if not uploaded_dokument:
-                    raise WorkItemError("Dokument upload mislykkedes")
+                    if not uploaded_dokument:
+                        raise WorkItemError(
+                            f"Dokument upload mislykkedes for fil: {attachment_name}"
+                        )
 
                 modtager = dubu.brugere.soeg_modtager_bruger(
                     borger_sag["primaerBehandler"]["navn"],
@@ -166,6 +168,14 @@ async def process_workqueue(workqueue: Workqueue):
 
                 tracker.track_task(proces_navn)
             except WorkItemError as e:
+                report(
+                    report_id="journalisering_af_opmaerksomhedsskemaer_i_dubu",
+                    group="Fejl",
+                    json={
+                        "Cpr": data.get("cpr_nr", "N/A"),
+                        "Fejl": str(e),
+                    }
+                )
                 # A WorkItemError represents a soft error that indicates the item should be passed to manual processing or a business logic fault
                 logger.error(f"Error processing item: {data}. Error: {e}")
                 item.fail(str(e))

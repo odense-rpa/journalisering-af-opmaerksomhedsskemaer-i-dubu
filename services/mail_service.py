@@ -564,18 +564,18 @@ class MailService:
             logger.error(f"Error listing attachments for message {message_id}: {e}")
             return []
 
-    async def get_first_file_attachment_bytes(
+    async def get_attachments(
         self, mailbox_address: str, message_id: str
-    ) -> Optional[Tuple[str, bytes, Dict[str, Any]]]:
+    ) -> List[Tuple[str, bytes, Dict[str, Any]]]:
         """
-        Get the first non-inline file attachment as raw bytes from a message.
+        Get all non-inline file attachments as raw bytes from a message.
 
         Args:
             mailbox_address: Email address of the mailbox
             message_id: ID of the message to get attachments from
 
         Returns:
-            Tuple of (attachment_name, content_bytes, metadata), or None if no file attachment exists.
+            List of tuples: (attachment_name, content_bytes, metadata).
         """
         if not self.graph_client:
             raise Exception("Graph client not initialized")
@@ -588,7 +588,7 @@ class MailService:
             )
 
             if not attachments or not attachments.value:
-                return None
+                return []
 
             file_attachments = [
                 att for att in attachments.value if not getattr(att, "is_inline", False)
@@ -597,6 +597,8 @@ class MailService:
             ordered_attachments = sorted(
                 file_attachments, key=lambda att: not _is_pdf(att)
             )
+
+            attachment_payloads: List[Tuple[str, bytes, Dict[str, Any]]] = []
 
             for attachment in ordered_attachments:
                 attachment_id = getattr(attachment, "id", None)
@@ -623,19 +625,21 @@ class MailService:
                             attachment, "last_modified_date_time", None
                         ),
                     }
-                    return (
-                        (getattr(attachment, "name", None) or "attachment.bin"),
-                        content_bytes,
-                        attachment_metadata,
+                    attachment_payloads.append(
+                        (
+                            (getattr(attachment, "name", None) or "attachment.bin"),
+                            content_bytes,
+                            attachment_metadata,
+                        )
                     )
 
-            return None
+            return attachment_payloads
 
         except Exception as e:
             logger.error(
                 f"Error reading attachment bytes for message {message_id}: {e}"
             )
-            return None
+            return []
 
     async def mark_message_as_read(self, mailbox_address: str, message_id: str) -> bool:
         """
